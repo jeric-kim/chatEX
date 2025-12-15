@@ -42,6 +42,17 @@ const NICKNAME_POOL = [
   '사과쨈'
 ];
 
+function buildDirectory() {
+  const expanded = [];
+  NICKNAME_POOL.forEach((base) => {
+    expanded.push(`${base}`);
+    for (let i = 0; i < 3; i += 1) {
+      expanded.push(`${base}#${Math.floor(Math.random() * 9000 + 1000)}`);
+    }
+  });
+  return expanded;
+}
+
 const state = {
   user: null,
   chats: [],
@@ -50,6 +61,7 @@ const state = {
   autoRefreshTimer: null,
   activeChatId: null,
   selectedSearch: null,
+  directory: [],
 };
 
 function randomNickname() {
@@ -86,6 +98,7 @@ function persistSession() {
       chats: serialized,
       sortOrder: state.sortOrder,
       autoRefreshMs: state.autoRefreshMs,
+      directory: state.directory,
     })
   );
 }
@@ -103,6 +116,7 @@ function loadSession() {
     }));
     state.sortOrder = parsed.sortOrder || 'latest';
     state.autoRefreshMs = parsed.autoRefreshMs || 0;
+    state.directory = parsed.directory || buildDirectory();
   } catch (error) {
     console.error('세션 로드 실패', error);
   }
@@ -113,6 +127,7 @@ function clearSession() {
   state.user = null;
   state.chats = [];
   state.activeChatId = null;
+  state.directory = [];
   stopAutoRefresh();
 }
 
@@ -229,6 +244,7 @@ function handleLogin(event) {
   currentNickname.textContent = nickname;
   state.chats = [];
   state.sortOrder = 'latest';
+  state.directory = buildDirectory();
   state.autoRefreshMs = Number(autoRefreshSelect.value) || 0;
   persistSession();
   toggleView(true);
@@ -280,21 +296,39 @@ function handleSendMessage(event) {
 
 function handleSearch(keyword) {
   const normalized = keyword.trim();
-  const candidates = NICKNAME_POOL.filter(
+  const haystack = state.directory.length ? state.directory : buildDirectory();
+  const candidates = haystack.filter(
     (name) =>
       name.toLowerCase().includes(normalized.toLowerCase()) &&
-      name !== state.user?.nickname &&
-      !state.chats.some((chat) => chat.partner === name)
+      name.toLowerCase() !== state.user?.nickname?.toLowerCase() &&
+      !state.chats.some((chat) => chat.partner.toLowerCase() === name.toLowerCase())
   );
 
   searchResults.innerHTML = '';
   if (!candidates.length) {
     const empty = document.createElement('li');
     empty.className = 'search-results__empty';
-    empty.textContent = '검색 결과가 없어요.';
-    searchResults.appendChild(empty);
-    startChatBtn.disabled = true;
-    state.selectedSearch = null;
+    if (!normalized) {
+      empty.textContent = '검색어를 입력해 주세요.';
+      startChatBtn.disabled = true;
+      state.selectedSearch = null;
+    } else {
+      empty.innerHTML = `검색 결과가 없어요. <strong>${normalized}</strong> 으로 시작할까요?`;
+      const li = document.createElement('li');
+      li.className = 'search-results__item search-results__item--manual';
+      li.innerHTML = `
+        <label>
+          <input type="radio" name="search-user" value="${normalized}" />
+          ${normalized} (새 닉네임)
+        </label>
+      `;
+      li.querySelector('input').addEventListener('change', (event) => {
+        state.selectedSearch = event.target.value;
+        startChatBtn.disabled = false;
+      });
+      searchResults.appendChild(li);
+    }
+    searchResults.prepend(empty);
     return;
   }
 
