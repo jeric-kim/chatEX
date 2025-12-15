@@ -54,6 +54,8 @@ function buildDirectory() {
 }
 
 const SERVER_KEY = 'chatEX-server';
+const REALTIME_ENDPOINT = 'wss://demo.piesocket.com/v3/1?api_key=demonstration&notify_self=1';
+const REALTIME_CHANNEL = 'chatEX-public';
 
 const state = {
   user: null,
@@ -65,6 +67,10 @@ const state = {
   selectedSearch: null,
   directory: [],
   chatMeta: {},
+  realtime: {
+    socket: null,
+    isConnected: false,
+  },
 };
 
 function randomNickname() {
@@ -196,6 +202,58 @@ function clearSession() {
   state.directory = [];
   state.chatMeta = {};
   stopAutoRefresh();
+  disconnectRealtime();
+}
+
+function connectRealtime() {
+  if (!state.user || state.realtime.socket) return;
+  const ws = new WebSocket(`${REALTIME_ENDPOINT}&channel=${REALTIME_CHANNEL}`);
+  state.realtime.socket = ws;
+
+  ws.addEventListener('open', () => {
+    state.realtime.isConnected = true;
+    sendRealtime({
+      type: 'register',
+      nickname: state.user.nickname,
+      server: getServer(),
+    });
+  });
+
+  ws.addEventListener('message', (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      handleRealtimePayload(payload);
+    } catch (error) {
+      console.error('실시간 메시지 처리 실패', error);
+    }
+  });
+
+  ws.addEventListener('close', () => {
+    state.realtime.isConnected = false;
+    state.realtime.socket = null;
+  });
+
+  ws.addEventListener('error', () => {
+    state.realtime.isConnected = false;
+  });
+}
+
+function disconnectRealtime() {
+  if (state.realtime.socket) {
+    state.realtime.socket.close();
+  }
+  state.realtime.socket = null;
+  state.realtime.isConnected = false;
+}
+
+function sendRealtime(message) {
+  if (!state.realtime.socket || state.realtime.socket.readyState !== WebSocket.OPEN) return;
+  state.realtime.socket.send(JSON.stringify(message));
+}
+
+function broadcastServerUpdate() {
+  if (!state.user) return;
+  sendRealtime({ type: 'server-sync', nickname: state.user.nickname, server: getServer() });
 }
 
 function showToast(message) {
@@ -258,6 +316,61 @@ function syncFromServer() {
 
   state.chats = rebuilt;
   state.directory = Array.from(new Set([...(server.users || []), ...state.directory]));
+}
+
+function applyServerSnapshot(snapshot) {
+  if (!snapshot || !snapshot.conversations) return;
+  const current = getServer();
+  const mergedUsers = Array.from(new Set([...(current.users || []), ...(snapshot.users || [])]));
+  const mergedConversations = { ...current.conversations };
+
+  Object.entries(snapshot.conversations || {}).forEach(([id, conv]) => {
+    const existing = mergedConversations[id];
+    if (!existing) {
+      mergedConversations[id] = conv;
+      return;
+    }
+
+    const existingMessages = existing.messages || [];
+    const incomingMessages = conv.messages || [];
+    const existingLast = existingMessages.length ? existingMessages[existingMessages.length - 1].timestamp : existing.updatedAt;
+    const incomingLast = incomingMessages.length ? incomingMessages[incomingMessages.length - 1].timestamp : conv.updatedAt;
+    if (!existingLast || (incomingLast && new Date(incomingLast) >= new Date(existingLast))) {
+      mergedConversations[id] = conv;
+    }
+  });
+
+  saveServer({ users: mergedUsers, conversations: mergedConversations });
+  syncFromServer();
+  renderChats();
+  renderConversation();
+}
+
+function handleRealtimePayload(payload) {
+  if (!payload || !payload.type) return;
+  if (payload.nickname && payload.nickname !== state.user?.nickname) {
+    state.directory = Array.from(new Set([...state.directory, payload.nickname]));
+  }
+
+  switch (payload.type) {
+    case 'register':
+      if (payload.server) {
+        applyServerSnapshot(payload.server);
+      }
+      break;
+    case 'server-sync':
+      if (payload.server) {
+        applyServerSnapshot(payload.server);
+      }
+      break;
+    case 'chat-message': {
+      if (!payload.server) return;
+      applyServerSnapshot(payload.server);
+      break;
+    }
+    default:
+      break;
+  }
 }
 
 function renderChats() {
@@ -353,6 +466,7 @@ function handleLogin(event) {
   state.autoRefreshMs = Number(autoRefreshSelect.value) || 0;
   persistSession();
   toggleView(true);
+  connectRealtime();
   renderChats();
   showToast(`${nickname}님, 환영해요!`);
 }
@@ -376,6 +490,8 @@ function pushMessageToServer(partner, content, sender) {
   const full = getServer();
   full.conversations[server.id] = server;
   saveServer(full);
+  broadcastServerUpdate();
+  sendRealtime({ type: 'chat-message', nickname: state.user.nickname, server: full });
 }
 
 function handleSendMessage(event) {
@@ -470,6 +586,7 @@ function startNewChat() {
   const partner = state.selectedSearch;
   const conversation = upsertConversation(partner);
   state.chatMeta[conversation.id] = state.chatMeta[conversation.id] || { lastRead: new Date(0) };
+  broadcastServerUpdate();
   syncFromServer();
   persistSession();
   closeModal();
@@ -526,6 +643,7 @@ if (state.user) {
   autoRefreshSelect.value = state.autoRefreshMs?.toString() || '0';
   startAutoRefresh(state.autoRefreshMs);
   toggleView(true);
+  connectRealtime();
   refreshAll();
 } else {
   toggleView(false);
