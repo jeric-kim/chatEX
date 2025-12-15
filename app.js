@@ -5,10 +5,25 @@ const nicknameInput = document.getElementById('nickname-input');
 const passwordInput = document.getElementById('password-input');
 const currentNickname = document.getElementById('current-nickname');
 const chatList = document.getElementById('chat-list');
+const chatEmpty = document.getElementById('chat-empty');
 const sortSelect = document.getElementById('sort-select');
-const newChatBtn = document.getElementById('new-chat-btn');
+const refreshBtn = document.getElementById('refresh-btn');
+const autoRefreshSelect = document.getElementById('auto-refresh');
 const logoutBtn = document.getElementById('logout-btn');
 const toast = document.getElementById('toast');
+const fab = document.getElementById('fab');
+const conversationView = document.getElementById('conversation-view');
+const backBtn = document.getElementById('back-btn');
+const activePartner = document.getElementById('active-partner');
+const messageList = document.getElementById('message-list');
+const messageForm = document.getElementById('message-form');
+const messageInput = document.getElementById('message-input');
+const searchModal = document.getElementById('search-modal');
+const closeModalBtn = document.getElementById('close-modal');
+const searchInput = document.getElementById('search-input');
+const searchBtn = document.getElementById('search-btn');
+const searchResults = document.getElementById('search-results');
+const startChatBtn = document.getElementById('start-chat-btn');
 
 const NICKNAME_POOL = [
   '노랑우산',
@@ -21,12 +36,20 @@ const NICKNAME_POOL = [
   '별빛달빛',
   '핑퐁',
   '크렘브륄레',
+  '라벤더향기',
+  '버터쿠키',
+  '달리는고래',
+  '사과쨈'
 ];
 
 const state = {
   user: null,
   chats: [],
   sortOrder: 'latest',
+  autoRefreshMs: 0,
+  autoRefreshTimer: null,
+  activeChatId: null,
+  selectedSearch: null,
 };
 
 function randomNickname() {
@@ -51,9 +74,19 @@ function truncateContent(text) {
 
 function persistSession() {
   if (!state.user) return;
+  const serialized = state.chats.map((chat) => ({
+    ...chat,
+    createdAt: chat.createdAt.toISOString(),
+    messages: chat.messages.map((msg) => ({ ...msg, timestamp: msg.timestamp.toISOString() })),
+  }));
   localStorage.setItem(
     'chatEX-session',
-    JSON.stringify({ user: state.user, chats: state.chats, sortOrder: state.sortOrder })
+    JSON.stringify({
+      user: state.user,
+      chats: serialized,
+      sortOrder: state.sortOrder,
+      autoRefreshMs: state.autoRefreshMs,
+    })
   );
 }
 
@@ -63,8 +96,13 @@ function loadSession() {
   try {
     const parsed = JSON.parse(stored);
     state.user = parsed.user;
-    state.chats = parsed.chats.map((chat) => ({ ...chat, timestamp: new Date(chat.timestamp) }));
+    state.chats = (parsed.chats || []).map((chat) => ({
+      ...chat,
+      createdAt: new Date(chat.createdAt || Date.now()),
+      messages: (chat.messages || []).map((msg) => ({ ...msg, timestamp: new Date(msg.timestamp) })),
+    }));
     state.sortOrder = parsed.sortOrder || 'latest';
+    state.autoRefreshMs = parsed.autoRefreshMs || 0;
   } catch (error) {
     console.error('세션 로드 실패', error);
   }
@@ -74,6 +112,8 @@ function clearSession() {
   localStorage.removeItem('chatEX-session');
   state.user = null;
   state.chats = [];
+  state.activeChatId = null;
+  stopAutoRefresh();
 }
 
 function showToast(message) {
@@ -92,65 +132,87 @@ function toggleView(isLoggedIn) {
   }
 }
 
+function lastMessage(chat) {
+  if (!chat.messages.length) return null;
+  return chat.messages[chat.messages.length - 1];
+}
+
+function sortChats(list) {
+  return [...list].sort((a, b) => {
+    const aLast = lastMessage(a)?.timestamp?.getTime?.() || a.createdAt.getTime();
+    const bLast = lastMessage(b)?.timestamp?.getTime?.() || b.createdAt.getTime();
+    return state.sortOrder === 'latest' ? bLast - aLast : aLast - bLast;
+  });
+}
+
 function renderChats() {
   chatList.innerHTML = '';
-  const template = document.getElementById('chat-item-template');
-  const sorted = [...state.chats].sort((a, b) => {
-    return state.sortOrder === 'latest'
-      ? b.timestamp.getTime() - a.timestamp.getTime()
-      : a.timestamp.getTime() - b.timestamp.getTime();
-  });
+  const sorted = sortChats(state.chats);
+  chatEmpty.classList.toggle('hidden', sorted.length > 0);
 
+  const template = document.getElementById('chat-item-template');
   sorted.forEach((chat) => {
     const clone = template.content.cloneNode(true);
-    clone.querySelector('.chat-item__name').textContent = chat.sender;
-    clone.querySelector('.chat-item__timestamp').textContent = formatTimestamp(chat.timestamp);
-    clone.querySelector('.chat-item__preview').textContent = truncateContent(chat.content);
+    const preview = lastMessage(chat);
+
+    clone.querySelector('.chat-item__name').textContent = chat.partner;
+    const timeSource = preview ? preview.timestamp : chat.createdAt;
+    clone.querySelector('.chat-item__timestamp').textContent = formatTimestamp(timeSource);
+    clone.querySelector('.chat-item__preview').textContent = preview
+      ? truncateContent(preview.content)
+      : '메시지를 남겨 보세요.';
     const badge = clone.querySelector('.chat-item__badge');
-    if (chat.isNew) {
-      badge.classList.remove('hidden');
-    }
+    badge.classList.toggle('hidden', !chat.hasNew);
 
     const item = clone.querySelector('.chat-item');
-    item.addEventListener('click', () => markAsRead(chat.id));
+    item.addEventListener('click', () => openConversation(chat.id));
     chatList.appendChild(clone);
   });
 }
 
-function markAsRead(chatId) {
-  const chat = state.chats.find((item) => item.id === chatId);
-  if (chat && chat.isNew) {
-    chat.isNew = false;
-    persistSession();
-    renderChats();
+function renderConversation() {
+  const chat = state.chats.find((c) => c.id === state.activeChatId);
+  if (!chat) {
+    conversationView.classList.add('hidden');
+    return;
+  }
+
+  conversationView.classList.remove('hidden');
+  activePartner.textContent = chat.partner;
+  chat.hasNew = false;
+  messageList.innerHTML = '';
+
+  chat.messages.forEach((msg) => {
+    const li = document.createElement('li');
+    li.classList.add('message', msg.sender === state.user.nickname ? 'message--me' : 'message--them');
+    li.innerHTML = `
+      <div class="message__bubble">
+        <p class="message__text">${msg.content}</p>
+        <span class="message__time">${formatTimestamp(msg.timestamp)}</span>
+      </div>
+    `;
+    messageList.appendChild(li);
+  });
+  messageList.scrollTop = messageList.scrollHeight;
+  persistSession();
+}
+
+function refreshAll() {
+  renderChats();
+  renderConversation();
+}
+
+function stopAutoRefresh() {
+  if (state.autoRefreshTimer) {
+    clearInterval(state.autoRefreshTimer);
+    state.autoRefreshTimer = null;
   }
 }
 
-function simulateChats() {
-  const base = new Date();
-  const samples = [
-    {
-      sender: '밍밍',
-      content: '오늘 저녁 메뉴 추천 좀 해줘!',
-      timestamp: new Date(base.getTime() - 1000 * 60 * 12),
-    },
-    {
-      sender: '카페사장',
-      content: '아이스라떼 픽업 가능하세요?',
-      timestamp: new Date(base.getTime() - 1000 * 60 * 30),
-    },
-    {
-      sender: '팀플조장',
-      content: '내일까지 초안 공유 부탁해요. 일정 지켜보자!',
-      timestamp: new Date(base.getTime() - 1000 * 60 * 60 * 2),
-    },
-  ];
-
-  state.chats = samples.map((item, index) => ({
-    ...item,
-    id: `seed-${index}`,
-    isNew: false,
-  }));
+function startAutoRefresh(ms) {
+  stopAutoRefresh();
+  if (!ms) return;
+  state.autoRefreshTimer = setInterval(refreshAll, ms);
 }
 
 function handleLogin(event) {
@@ -165,7 +227,9 @@ function handleLogin(event) {
 
   state.user = { nickname, password };
   currentNickname.textContent = nickname;
-  simulateChats();
+  state.chats = [];
+  state.sortOrder = 'latest';
+  state.autoRefreshMs = Number(autoRefreshSelect.value) || 0;
   persistSession();
   toggleView(true);
   renderChats();
@@ -179,22 +243,113 @@ function handleLogout() {
   showToast('로그아웃 되었어요. 정보가 모두 삭제되었습니다.');
 }
 
-function receiveNewChat() {
-  const now = new Date();
-  const newChat = {
-    id: `chat-${now.getTime()}`,
-    sender: randomNickname(),
-    content: '새 메시지가 도착했어요. 바로 확인해 주세요!',
-    timestamp: now,
-    isNew: true,
-  };
+function openConversation(chatId) {
+  state.activeChatId = chatId;
+  renderConversation();
+}
 
-  state.chats.unshift(newChat);
-  state.sortOrder = 'latest';
-  sortSelect.value = 'latest';
+function addMessage(chat, content, sender) {
+  const message = { content, sender, timestamp: new Date() };
+  chat.messages.push(message);
+}
+
+function simulateReply(chat) {
+  setTimeout(() => {
+    const reply = `안녕, ${state.user.nickname}! 메시지 잘 받았어.`;
+    addMessage(chat, reply, chat.partner);
+    chat.hasNew = state.activeChatId === chat.id ? false : true;
+    persistSession();
+    refreshAll();
+  }, Math.random() * 800 + 700);
+}
+
+function handleSendMessage(event) {
+  event.preventDefault();
+  const text = messageInput.value.trim();
+  if (!text) return;
+  const chat = state.chats.find((c) => c.id === state.activeChatId);
+  if (!chat) return;
+
+  addMessage(chat, text, state.user.nickname);
+  chat.hasNew = false;
+  messageInput.value = '';
   persistSession();
+  refreshAll();
+  simulateReply(chat);
+}
+
+function handleSearch(keyword) {
+  const normalized = keyword.trim();
+  const candidates = NICKNAME_POOL.filter(
+    (name) =>
+      name.toLowerCase().includes(normalized.toLowerCase()) &&
+      name !== state.user?.nickname &&
+      !state.chats.some((chat) => chat.partner === name)
+  );
+
+  searchResults.innerHTML = '';
+  if (!candidates.length) {
+    const empty = document.createElement('li');
+    empty.className = 'search-results__empty';
+    empty.textContent = '검색 결과가 없어요.';
+    searchResults.appendChild(empty);
+    startChatBtn.disabled = true;
+    state.selectedSearch = null;
+    return;
+  }
+
+  candidates.forEach((name) => {
+    const li = document.createElement('li');
+    li.className = 'search-results__item';
+    li.innerHTML = `
+      <label>
+        <input type="radio" name="search-user" value="${name}" />
+        ${name}
+      </label>
+    `;
+    li.querySelector('input').addEventListener('change', (event) => {
+      state.selectedSearch = event.target.value;
+      startChatBtn.disabled = false;
+    });
+    searchResults.appendChild(li);
+  });
+}
+
+function resetModal() {
+  state.selectedSearch = null;
+  searchInput.value = '';
+  searchResults.innerHTML = '';
+  startChatBtn.disabled = true;
+}
+
+function openModal() {
+  resetModal();
+  searchModal.classList.remove('hidden');
+  searchInput.focus();
+}
+
+function closeModal() {
+  searchModal.classList.add('hidden');
+}
+
+function startNewChat() {
+  if (!state.selectedSearch) return;
+  const partner = state.selectedSearch;
+  let chat = state.chats.find((c) => c.partner === partner);
+  if (!chat) {
+    chat = { id: `chat-${Date.now()}`, partner, createdAt: new Date(), messages: [], hasNew: false };
+    state.chats.unshift(chat);
+  }
+  persistSession();
+  closeModal();
+  openConversation(chat.id);
+  refreshAll();
+}
+
+function handleBack() {
+  state.activeChatId = null;
+  conversationView.classList.add('hidden');
   renderChats();
-  showToast('신규 채팅을 수신했어요!');
 }
 
 loginForm.addEventListener('submit', handleLogin);
@@ -203,15 +358,36 @@ sortSelect.addEventListener('change', (event) => {
   persistSession();
   renderChats();
 });
-newChatBtn.addEventListener('click', receiveNewChat);
+refreshBtn.addEventListener('click', refreshAll);
+autoRefreshSelect.addEventListener('change', (event) => {
+  const ms = Number(event.target.value);
+  state.autoRefreshMs = ms;
+  startAutoRefresh(ms);
+  persistSession();
+  showToast(ms ? `${ms / 1000}초마다 자동 새로고침` : '자동 새로고침 꺼짐');
+});
 logoutBtn.addEventListener('click', handleLogout);
+fab.addEventListener('click', openModal);
+closeModalBtn.addEventListener('click', closeModal);
+searchBtn.addEventListener('click', () => handleSearch(searchInput.value));
+searchInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    handleSearch(searchInput.value);
+  }
+});
+startChatBtn.addEventListener('click', startNewChat);
+backBtn.addEventListener('click', handleBack);
+messageForm.addEventListener('submit', handleSendMessage);
 
 loadSession();
 if (state.user) {
   currentNickname.textContent = state.user.nickname;
-  state.chats = state.chats.map((chat) => ({ ...chat, isNew: false }));
+  sortSelect.value = state.sortOrder;
+  autoRefreshSelect.value = state.autoRefreshMs?.toString() || '0';
+  startAutoRefresh(state.autoRefreshMs);
   toggleView(true);
-  renderChats();
+  refreshAll();
 } else {
   toggleView(false);
 }
