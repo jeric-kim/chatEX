@@ -53,6 +53,8 @@ function buildDirectory() {
   return expanded;
 }
 
+const SERVER_KEY = 'chatEX-server';
+
 const state = {
   user: null,
   chats: [],
@@ -62,6 +64,7 @@ const state = {
   activeChatId: null,
   selectedSearch: null,
   directory: [],
+  chatMeta: {},
 };
 
 function randomNickname() {
@@ -77,6 +80,63 @@ function formatTimestamp(date) {
   const minutes = String(date.getMinutes()).padStart(2, '0');
   const seconds = String(date.getSeconds()).padStart(2, '0');
   return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+}
+
+function normalizeNickname(name) {
+  return name?.trim().toLowerCase();
+}
+
+function getServer() {
+  const stored = localStorage.getItem(SERVER_KEY);
+  if (!stored) {
+    return { users: [], conversations: {} };
+  }
+  try {
+    const parsed = JSON.parse(stored);
+    return {
+      users: parsed.users || [],
+      conversations: parsed.conversations || {},
+    };
+  } catch (error) {
+    console.error('서버 데이터 로드 실패', error);
+    return { users: [], conversations: {} };
+  }
+}
+
+function saveServer(server) {
+  localStorage.setItem(SERVER_KEY, JSON.stringify(server));
+}
+
+function ensureUserRegistered(nickname) {
+  const server = getServer();
+  const normalized = normalizeNickname(nickname);
+  if (!server.users.some((user) => normalizeNickname(user) === normalized)) {
+    server.users.push(nickname);
+    saveServer(server);
+  }
+  return server;
+}
+
+function conversationKey(a, b) {
+  return [normalizeNickname(a), normalizeNickname(b)].sort().join('|');
+}
+
+function upsertConversation(partner) {
+  const server = getServer();
+  const id = conversationKey(state.user.nickname, partner);
+  const existing = server.conversations[id];
+
+  if (!existing) {
+    server.conversations[id] = {
+      id,
+      participants: [state.user.nickname, partner],
+      createdAt: new Date().toISOString(),
+      messages: [],
+    };
+    saveServer(server);
+  }
+
+  return server.conversations[id];
 }
 
 function truncateContent(text) {
@@ -99,6 +159,9 @@ function persistSession() {
       sortOrder: state.sortOrder,
       autoRefreshMs: state.autoRefreshMs,
       directory: state.directory,
+      chatMeta: Object.fromEntries(
+        Object.entries(state.chatMeta).map(([id, meta]) => [id, { ...meta, lastRead: meta.lastRead?.toISOString?.() }])
+      ),
     })
   );
 }
@@ -117,6 +180,9 @@ function loadSession() {
     state.sortOrder = parsed.sortOrder || 'latest';
     state.autoRefreshMs = parsed.autoRefreshMs || 0;
     state.directory = parsed.directory || buildDirectory();
+    state.chatMeta = Object.fromEntries(
+      Object.entries(parsed.chatMeta || {}).map(([id, meta]) => [id, { ...meta, lastRead: meta.lastRead ? new Date(meta.lastRead) : new Date(0) }])
+    );
   } catch (error) {
     console.error('세션 로드 실패', error);
   }
@@ -128,6 +194,7 @@ function clearSession() {
   state.chats = [];
   state.activeChatId = null;
   state.directory = [];
+  state.chatMeta = {};
   stopAutoRefresh();
 }
 
@@ -158,6 +225,39 @@ function sortChats(list) {
     const bLast = lastMessage(b)?.timestamp?.getTime?.() || b.createdAt.getTime();
     return state.sortOrder === 'latest' ? bLast - aLast : aLast - bLast;
   });
+}
+
+function syncFromServer() {
+  if (!state.user) return;
+  const server = getServer();
+  const relevant = Object.values(server.conversations).filter((conv) =>
+    conv.participants.some((p) => normalizeNickname(p) === normalizeNickname(state.user.nickname))
+  );
+
+  const rebuilt = relevant.map((conv) => {
+    const partner = conv.participants.find((p) => normalizeNickname(p) !== normalizeNickname(state.user.nickname)) ||
+      state.user.nickname;
+    const messages = (conv.messages || []).map((msg) => ({
+      ...msg,
+      timestamp: new Date(msg.timestamp),
+    }));
+    const createdAt = conv.createdAt ? new Date(conv.createdAt) : messages[0]?.timestamp || new Date();
+    const meta = state.chatMeta[conv.id] || { lastRead: new Date(0) };
+    const hasNew = messages.some(
+      (msg) => msg.sender && normalizeNickname(msg.sender) !== normalizeNickname(state.user.nickname) && msg.timestamp > meta.lastRead
+    );
+
+    return {
+      id: conv.id,
+      partner,
+      createdAt,
+      messages,
+      hasNew,
+    };
+  });
+
+  state.chats = rebuilt;
+  state.directory = Array.from(new Set([...(server.users || []), ...state.directory]));
 }
 
 function renderChats() {
@@ -209,10 +309,12 @@ function renderConversation() {
     messageList.appendChild(li);
   });
   messageList.scrollTop = messageList.scrollHeight;
+  state.chatMeta[chat.id] = { lastRead: new Date() };
   persistSession();
 }
 
 function refreshAll() {
+  syncFromServer();
   renderChats();
   renderConversation();
 }
@@ -245,6 +347,9 @@ function handleLogin(event) {
   state.chats = [];
   state.sortOrder = 'latest';
   state.directory = buildDirectory();
+  state.chatMeta = {};
+  ensureUserRegistered(nickname);
+  syncFromServer();
   state.autoRefreshMs = Number(autoRefreshSelect.value) || 0;
   persistSession();
   toggleView(true);
@@ -264,19 +369,13 @@ function openConversation(chatId) {
   renderConversation();
 }
 
-function addMessage(chat, content, sender) {
-  const message = { content, sender, timestamp: new Date() };
-  chat.messages.push(message);
-}
-
-function simulateReply(chat) {
-  setTimeout(() => {
-    const reply = `안녕, ${state.user.nickname}! 메시지 잘 받았어.`;
-    addMessage(chat, reply, chat.partner);
-    chat.hasNew = state.activeChatId === chat.id ? false : true;
-    persistSession();
-    refreshAll();
-  }, Math.random() * 800 + 700);
+function pushMessageToServer(partner, content, sender) {
+  const server = upsertConversation(partner);
+  const message = { content, sender, timestamp: new Date().toISOString() };
+  server.messages.push(message);
+  const full = getServer();
+  full.conversations[server.id] = server;
+  saveServer(full);
 }
 
 function handleSendMessage(event) {
@@ -286,12 +385,12 @@ function handleSendMessage(event) {
   const chat = state.chats.find((c) => c.id === state.activeChatId);
   if (!chat) return;
 
-  addMessage(chat, text, state.user.nickname);
-  chat.hasNew = false;
+  pushMessageToServer(chat.partner, text, state.user.nickname);
+  state.chatMeta[chat.id] = { lastRead: new Date() };
   messageInput.value = '';
+  syncFromServer();
   persistSession();
   refreshAll();
-  simulateReply(chat);
 }
 
 function handleSearch(keyword) {
@@ -369,14 +468,12 @@ function closeModal() {
 function startNewChat() {
   if (!state.selectedSearch) return;
   const partner = state.selectedSearch;
-  let chat = state.chats.find((c) => c.partner === partner);
-  if (!chat) {
-    chat = { id: `chat-${Date.now()}`, partner, createdAt: new Date(), messages: [], hasNew: false };
-    state.chats.unshift(chat);
-  }
+  const conversation = upsertConversation(partner);
+  state.chatMeta[conversation.id] = state.chatMeta[conversation.id] || { lastRead: new Date(0) };
+  syncFromServer();
   persistSession();
   closeModal();
-  openConversation(chat.id);
+  openConversation(conversation.id);
   refreshAll();
 }
 
@@ -413,10 +510,18 @@ searchInput.addEventListener('keydown', (event) => {
 startChatBtn.addEventListener('click', startNewChat);
 backBtn.addEventListener('click', handleBack);
 messageForm.addEventListener('submit', handleSendMessage);
+window.addEventListener('storage', (event) => {
+  if (event.key === SERVER_KEY || event.key === 'chatEX-session') {
+    syncFromServer();
+    refreshAll();
+  }
+});
 
 loadSession();
 if (state.user) {
   currentNickname.textContent = state.user.nickname;
+  ensureUserRegistered(state.user.nickname);
+  syncFromServer();
   sortSelect.value = state.sortOrder;
   autoRefreshSelect.value = state.autoRefreshMs?.toString() || '0';
   startAutoRefresh(state.autoRefreshMs);
