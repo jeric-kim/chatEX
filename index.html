@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>톡톡 - 모바일 웹 채팅</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main id="app" class="app-shell">
+    <section id="login-view" class="card hidden">
+      <header class="card__header">
+        <h1>톡톡 로그인</h1>
+        <p class="caption">일회용 닉네임과 비밀번호로 바로 시작하세요.</p>
+      </header>
+      <form id="login-form" class="form">
+        <label class="form__group">
+          <span class="form__label">닉네임 (선택)</span>
+          <input id="nickname-input" name="nickname" type="text" maxlength="20" placeholder="닉네임을 입력하거나 비워두세요" />
+        </label>
+        <label class="form__group">
+          <span class="form__label">비밀번호</span>
+          <input id="password-input" name="password" type="password" maxlength="32" placeholder="비밀번호를 입력하세요" required />
+        </label>
+        <p class="help">닉네임을 비워두면 랜덤 닉네임이 지정돼요.</p>
+        <button type="submit" class="primary-btn">로그인</button>
+      </form>
+    </section>
+
+    <section id="chat-view" class="hidden">
+      <header class="toolbar">
+        <div class="toolbar__user">
+          <div class="avatar" aria-hidden="true"></div>
+          <div>
+            <p class="label">로그인 닉네임</p>
+            <p id="current-nickname" class="title"></p>
+          </div>
+        </div>
+        <button id="logout-btn" class="ghost-btn">로그아웃</button>
+      </header>
+
+      <section class="controls">
+        <div class="controls__group">
+          <label for="sort-select" class="form__label">정렬</label>
+          <select id="sort-select">
+            <option value="latest">최신 순</option>
+            <option value="oldest">오래된 순</option>
+          </select>
+        </div>
+        <div class="controls__group inline">
+          <label for="auto-refresh" class="form__label">자동 새로고침</label>
+          <select id="auto-refresh">
+            <option value="0">끄기</option>
+            <option value="5000">5초</option>
+            <option value="10000">10초</option>
+            <option value="15000">15초</option>
+          </select>
+          <button id="refresh-btn" class="ghost-btn">새로고침</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <header class="card__header">
+          <h2>채팅방 목록</h2>
+          <p class="caption">신규 채팅은 상단에 표시돼요.</p>
+        </header>
+        <div id="chat-empty" class="empty-state hidden">아직 채팅방이 없어요. + 버튼으로 새 채팅을 시작하세요.</div>
+        <ul id="chat-list" class="chat-list" aria-live="polite"></ul>
+      </section>
+
+      <button id="fab" class="fab" aria-label="새 채팅 추가">+</button>
+
+      <section id="conversation-view" class="card conversation hidden" aria-live="polite">
+        <header class="conversation__header">
+          <button id="back-btn" class="icon-btn" aria-label="뒤로 가기">←</button>
+          <div>
+            <p class="caption">대화 중</p>
+            <p id="active-partner" class="title"></p>
+          </div>
+        </header>
+        <ul id="message-list" class="message-list"></ul>
+        <form id="message-form" class="message-form">
+          <input id="message-input" type="text" maxlength="120" placeholder="메시지를 입력하세요" required />
+          <button type="submit" class="primary-btn">보내기</button>
+        </form>
+      </section>
+    </section>
+  </main>
+
+  <section id="search-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal__content">
+      <header class="modal__header">
+        <h3>새로운 사람에게 채팅 보내기</h3>
+        <button id="close-modal" class="icon-btn" aria-label="닫기">×</button>
+      </header>
+      <div class="search-box">
+        <input id="search-input" type="text" placeholder="닉네임 검색" />
+        <button id="search-btn" class="icon-btn" aria-label="검색">🔍</button>
+      </div>
+      <ul id="search-results" class="search-results"></ul>
+      <button id="start-chat-btn" class="secondary-btn" disabled>채팅 시작 하기</button>
+    </div>
+  </section>
+
+  <template id="chat-item-template">
+    <li class="chat-item">
+      <div class="chat-item__content">
+        <div class="chat-item__title">
+          <span class="chat-item__name"></span>
+          <span class="chat-item__timestamp"></span>
+        </div>
+        <p class="chat-item__preview"></p>
+      </div>
+      <span class="chat-item__badge hidden">NEW</span>
+    </li>
+  </template>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
